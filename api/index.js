@@ -1,40 +1,65 @@
-import { PassThrough, Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
-
-export const config = {
-  api: { bodyParser: false },
-  supportsResponseStreaming: true,
-  maxDuration: 60,
-};
+export const config = { runtime: "edge" };
 
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-const PLATFORM_HEADER_PREFIX = `x-${String.fromCharCode(118, 101, 114, 99, 101, 108)}-`;
-const RELAY_PATH = normalizeRelayPath(process.env.RELAY_PATH || "");
-const RELAY_KEY = (process.env.RELAY_KEY || "").trim();
-const UPSTREAM_TIMEOUT_MS = parsePositiveInt(process.env.UPSTREAM_TIMEOUT_MS, 120000, 1000);
-const MAX_INFLIGHT = parsePositiveInt(process.env.MAX_INFLIGHT, 24, 1);
-const MAX_UP_BPS = parseNonNegativeInt(process.env.MAX_UP_BPS, 4587520);
-const MAX_DOWN_BPS = parseNonNegativeInt(process.env.MAX_DOWN_BPS, 4587520);
-
-const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST"]);
-const FORWARD_HEADER_EXACT = new Set([
-  "accept",
-  "accept-encoding",
-  "accept-language",
-  "cache-control",
-  "content-length",
-  "content-type",
-  "pragma",
-  "range",
-  "referer",
-  "user-agent",
-]);
-const FORWARD_HEADER_PREFIXES = ["sec-ch-", "sec-fetch-"];
 
 const STRIP_HEADERS = new Set([
   "host",
   "connection",
-  "proxy-connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+]);
+
+export default async function handler(req) {
+  if (!TARGET_BASE) {
+    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+  }
+
+  try {
+    const pathStart = req.url.indexOf("/", 8);
+    const targetUrl =
+      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
+
+    const out = new Headers();
+    let clientIp = null;
+    for (const [k, v] of req.headers) {
+      if (STRIP_HEADERS.has(k)) continue;
+      if (k.startsWith("x-vercel-")) continue;
+      if (k === "x-real-ip") {
+        clientIp = v;
+        continue;
+      }
+      if (k === "x-forwarded-for") {
+        if (!clientIp) clientIp = v;
+        continue;
+      }
+      out.set(k, v);
+    }
+    if (clientIp) out.set("x-forwarded-for", clientIp);
+
+    const method = req.method;
+    const hasBody = method !== "GET" && method !== "HEAD";
+
+    return await fetch(targetUrl, {
+      method,
+      headers: out,
+      body: hasBody ? req.body : undefined,
+      duplex: "half",
+      redirect: "manual",
+    });
+  } catch (err) {
+    console.error("relay error:", err);
+    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
+  }
+}  "proxy-connection",
   "keep-alive",
   "via",
   "proxy-authenticate",
